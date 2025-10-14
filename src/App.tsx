@@ -42,10 +42,95 @@ export default function App() {
 
   const watchIdRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const messageQueueRef = useRef<string[]>([]);
+  const connectPromiseRef = useRef<Promise<void> | null>(null);
+  const isActiveRef = useRef(isActive);
+
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
 
   const DEVICE_ID = '4659060906808';
   const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
+
+  const markSent = () => {
+    setStatus('Sent');
+    setTimeout(() => {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        setStatus('Connected');
+      }
+    }, 800);
+  };
+
+  const flushQueue = () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    while (messageQueueRef.current.length > 0) {
+      const queued = messageQueueRef.current.shift();
+      if (queued) {
+        ws.send(queued);
+        markSent();
+      }
+    }
+  };
+
+  const ensureSocketConnection = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+
+    if (connectPromiseRef.current) {
+      return connectPromiseRef.current;
+    }
+
+    connectPromiseRef.current = new Promise<void>((resolve, reject) => {
+      setStatus('Connecting');
+
+      try {
+        const ws = new WebSocket(SOCKET_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        ws.onopen = () => {
+          settled = true;
+          setStatus('Connected');
+          flushQueue();
+          resolve();
+          connectPromiseRef.current = null;
+        };
+
+        ws.onerror = (event) => {
+          console.error('WebSocket error', event);
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection error'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+
+        ws.onclose = () => {
+          wsRef.current = null;
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection closed before opening'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket', error);
+        connectPromiseRef.current = null;
+        reject(error as Error);
+      }
+    });
+
+    return connectPromiseRef.current;
+  };
 
   // Check permission status on mount
   useEffect(() => {
@@ -169,6 +254,14 @@ export default function App() {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    messageQueueRef.current = [];
+    connectPromiseRef.current = null;
   };
 
   // Send data to the configured server endpoint
