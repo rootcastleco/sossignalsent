@@ -5,6 +5,8 @@ import { LocationCard } from './components/LocationCard';
 import { SOSButton } from './components/SOSButton';
 import { TransmissionCard } from './components/TransmissionCard';
 
+type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error' | 'Relay Error';
+type RelayState = 'Offline' | 'Connecting' | 'Connected' | 'Error';
 type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error';
 
 // Format GPRMC message
@@ -35,7 +37,9 @@ export default function App() {
   const [isActive, setIsActive] = useState(false);
   const [status, setStatus] = useState<StatusType>('Disconnected');
   const [location, setLocation] = useState({ latitude: 0, longitude: 0 });
-  const [lastTransmission, setLastTransmission] = useState('');
+  const [lastOutbound, setLastOutbound] = useState('');
+  const [lastInbound, setLastInbound] = useState('');
+  const [relayState, setRelayState] = useState<RelayState>('Offline');
   const [locationError, setLocationError] = useState('');
   const [permissionState, setPermissionState] = useState<string>('');
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
@@ -45,18 +49,25 @@ export default function App() {
   const messageQueueRef = useRef<string[]>([]);
   const connectPromiseRef = useRef<Promise<void> | null>(null);
   const isActiveRef = useRef(isActive);
+  const relayReadyRef = useRef(false);
+  const textDecoderRef = useRef<TextDecoder | null>(null);
+  const hasLocationFixRef = useRef(false);
 
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
 
   const DEVICE_ID = '4659060906808';
+  const TCP_SERVER = '179.60.177.14:6002';
+  const RELAY_URL = (import.meta.env.VITE_TCP_RELAY_URL as string | undefined) ?? 'ws://localhost:6003';
+  const SERVER = `tcp://${TCP_SERVER}`;
   const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
 
   const markSent = () => {
     setStatus('Sent');
     setTimeout(() => {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
       if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         setStatus('Connected');
       }
@@ -65,6 +76,7 @@ export default function App() {
 
   const flushQueue = () => {
     const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !relayReadyRef.current) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -79,6 +91,7 @@ export default function App() {
   };
 
   const ensureSocketConnection = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
@@ -89,6 +102,34 @@ export default function App() {
 
     connectPromiseRef.current = new Promise<void>((resolve, reject) => {
       setStatus('Connecting');
+      setRelayState('Connecting');
+      relayReadyRef.current = false;
+
+      if (!textDecoderRef.current) {
+        textDecoderRef.current = new TextDecoder();
+      }
+
+      try {
+        const ws = new WebSocket(RELAY_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        const resolveOnce = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+
+        const rejectOnce = (error: Error) => {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        };
+
+        ws.onopen = () => {
+          // Wait for relay status messages before marking as connected.
 
       try {
         const ws = new WebSocket(SOCKET_URL);
@@ -105,6 +146,11 @@ export default function App() {
 
         ws.onerror = (event) => {
           console.error('WebSocket error', event);
+          relayReadyRef.current = false;
+          setRelayState('Error');
+          setStatus('Relay Error');
+          wsRef.current = null;
+          rejectOnce(new Error('WebSocket connection error'));
           if (!settled) {
             settled = true;
             reject(new Error('WebSocket connection error'));
@@ -114,6 +160,87 @@ export default function App() {
         };
 
         ws.onclose = () => {
+          relayReadyRef.current = false;
+          setRelayState('Offline');
+          if (isActiveRef.current) {
+            setStatus('Disconnected');
+          }
+          wsRef.current = null;
+          rejectOnce(new Error('Relay connection closed'));
+          connectPromiseRef.current = null;
+        };
+
+        ws.onmessage = async (event) => {
+          let raw = '';
+
+          try {
+            if (typeof event.data === 'string') {
+              raw = event.data;
+            } else if (event.data instanceof Blob) {
+              raw = await event.data.text();
+            } else if (event.data instanceof ArrayBuffer) {
+              raw = textDecoderRef.current ? textDecoderRef.current.decode(event.data) : '';
+            }
+          } catch (error) {
+            console.error('Failed to decode relay message', error);
+            return;
+          }
+
+          if (!raw) {
+            return;
+          }
+
+          let parsed: { type?: string; status?: string; message?: string; data?: string };
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            console.warn('Received non-JSON relay payload', raw, error);
+            return;
+          }
+
+          if (parsed.type === 'status') {
+            switch (parsed.status) {
+              case 'connecting':
+                setRelayState('Connecting');
+                break;
+              case 'connected':
+                relayReadyRef.current = true;
+                setRelayState('Connected');
+                if (isActiveRef.current) {
+                  setStatus('Connected');
+                }
+                flushQueue();
+                resolveOnce();
+                connectPromiseRef.current = null;
+                break;
+              case 'disconnected':
+                relayReadyRef.current = false;
+                setRelayState('Offline');
+                if (isActiveRef.current) {
+                  setStatus('Disconnected');
+                }
+                rejectOnce(new Error('Relay disconnected'));
+                connectPromiseRef.current = null;
+                break;
+              case 'error':
+                relayReadyRef.current = false;
+                setRelayState('Error');
+                setStatus('Relay Error');
+                rejectOnce(new Error(parsed.message || 'Relay error'));
+                connectPromiseRef.current = null;
+                break;
+              default:
+                break;
+            }
+          } else if (parsed.type === 'downstream' && typeof parsed.data === 'string') {
+            setLastInbound(parsed.data);
+          }
+        };
+      } catch (error) {
+        console.error('Failed to create relay WebSocket', error);
+        relayReadyRef.current = false;
+        setRelayState('Error');
+        setStatus('Relay Error');
           wsRef.current = null;
           if (!settled) {
             settled = true;
@@ -165,6 +292,7 @@ export default function App() {
           setLocation({ latitude, longitude });
           setLocationError('');
           setPermissionState('granted');
+          hasLocationFixRef.current = true;
           resolve(true);
         },
         (error) => {
@@ -182,9 +310,11 @@ export default function App() {
               errorMsg = 'Location request timed out';
               break;
           }
-          
+
           setLocationError(errorMsg);
-          setStatus('GPS Error');
+          if (!hasLocationFixRef.current) {
+            setStatus('GPS Error');
+          }
           resolve(false);
         },
         {
@@ -211,14 +341,18 @@ export default function App() {
     }
 
     setStatus('Connecting');
+    setRelayState('Connecting');
     setLocationError('');
+    setLastOutbound('');
+    setLastInbound('');
 
     // Watch position for continuous updates
     watchIdRef.current = navigator.geolocation.watchPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
         setLocation({ latitude, longitude });
-        setStatus('Connected');
+        hasLocationFixRef.current = true;
+        setStatus(relayReadyRef.current ? 'Connected' : 'Connecting');
         setLocationError('');
 
         // Send location data
@@ -239,7 +373,13 @@ export default function App() {
             break;
         }
         setLocationError(errorMsg);
-        setStatus('GPS Error');
+        if (!hasLocationFixRef.current) {
+          setStatus('GPS Error');
+        } else if (relayReadyRef.current) {
+          setStatus('Connected');
+        } else {
+          setStatus('Connecting');
+        }
       },
       {
         enableHighAccuracy: true,
@@ -260,12 +400,39 @@ export default function App() {
       wsRef.current = null;
     }
 
+    relayReadyRef.current = false;
+    setRelayState('Offline');
+    hasLocationFixRef.current = false;
+    setLastInbound('');
+    setLastOutbound('');
     messageQueueRef.current = [];
     connectPromiseRef.current = null;
   };
 
   // Send data to the configured server endpoint
   const sendData = async (message: string) => {
+    setLastOutbound(message);
+    const ws = wsRef.current;
+
+    if (ws && ws.readyState === WebSocket.OPEN && relayReadyRef.current) {
+      try {
+        ws.send(message);
+        markSent();
+        return;
+      } catch (error) {
+        console.error('Failed to send over existing socket', error);
+      }
+    }
+
+    messageQueueRef.current.push(message);
+
+    try {
+      await ensureSocketConnection();
+      flushQueue();
+    } catch (error) {
+      console.error('Failed to send SOS message', error);
+      setStatus('Disconnected');
+      setRelayState('Error');
     setLastTransmission(message);
     setStatus('Connecting');
 
@@ -407,9 +574,11 @@ export default function App() {
               </div>
             )}
             
-            <StatusCard 
+            <StatusCard
               status={status}
               server={SERVER}
+              relay={RELAY_URL}
+              relayState={relayState}
               interval={INTERVAL}
             />
             
@@ -423,7 +592,7 @@ export default function App() {
               onClick={handleSOS}
             />
             
-            <TransmissionCard data={lastTransmission} />
+            <TransmissionCard outbound={lastOutbound} inbound={lastInbound} />
           </div>
         </div>
 
