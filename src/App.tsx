@@ -7,6 +7,7 @@ import { TransmissionCard } from './components/TransmissionCard';
 
 type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error' | 'Relay Error';
 type RelayState = 'Offline' | 'Connecting' | 'Connected' | 'Error';
+type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error';
 
 // Format GPRMC message
 const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM') => {
@@ -60,12 +61,14 @@ export default function App() {
   const TCP_SERVER = '179.60.177.14:6002';
   const RELAY_URL = (import.meta.env.VITE_TCP_RELAY_URL as string | undefined) ?? 'ws://localhost:6003';
   const SERVER = `tcp://${TCP_SERVER}`;
+  const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
 
   const markSent = () => {
     setStatus('Sent');
     setTimeout(() => {
       if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
         setStatus('Connected');
       }
     }, 800);
@@ -74,6 +77,7 @@ export default function App() {
   const flushQueue = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !relayReadyRef.current) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
 
@@ -88,6 +92,7 @@ export default function App() {
 
   const ensureSocketConnection = () => {
     if (wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
     }
 
@@ -125,6 +130,18 @@ export default function App() {
 
         ws.onopen = () => {
           // Wait for relay status messages before marking as connected.
+
+      try {
+        const ws = new WebSocket(SOCKET_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        ws.onopen = () => {
+          settled = true;
+          setStatus('Connected');
+          flushQueue();
+          resolve();
+          connectPromiseRef.current = null;
         };
 
         ws.onerror = (event) => {
@@ -134,6 +151,11 @@ export default function App() {
           setStatus('Relay Error');
           wsRef.current = null;
           rejectOnce(new Error('WebSocket connection error'));
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection error'));
+          }
+          setStatus('Disconnected');
           connectPromiseRef.current = null;
         };
 
@@ -219,6 +241,16 @@ export default function App() {
         relayReadyRef.current = false;
         setRelayState('Error');
         setStatus('Relay Error');
+          wsRef.current = null;
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection closed before opening'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket', error);
         connectPromiseRef.current = null;
         reject(error as Error);
       }
@@ -401,6 +433,27 @@ export default function App() {
       console.error('Failed to send SOS message', error);
       setStatus('Disconnected');
       setRelayState('Error');
+    setLastTransmission(message);
+    setStatus('Connecting');
+
+    try {
+      await fetch(SERVER, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: message,
+        mode: 'no-cors',
+      });
+
+      setStatus('Sent');
+
+      setTimeout(() => {
+        if (isActive) setStatus('Connected');
+      }, 800);
+    } catch (error) {
+      console.error('Failed to send SOS message', error);
+      setStatus('Disconnected');
     }
   };
 
