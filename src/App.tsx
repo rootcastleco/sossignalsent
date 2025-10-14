@@ -7,16 +7,6 @@ import { TransmissionCard } from './components/TransmissionCard';
 
 type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error';
 
-// Generate a persistent device ID (since IMEI isn't accessible in web browsers)
-const getDeviceId = () => {
-  let deviceId = localStorage.getItem('device_id');
-  if (!deviceId) {
-    deviceId = Math.random().toString().slice(2, 15);
-    localStorage.setItem('device_id', deviceId);
-  }
-  return deviceId;
-};
-
 // Format GPRMC message
 const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM') => {
   const now = new Date();
@@ -36,10 +26,9 @@ const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM')
 
   const L = toNmea(lat, true);
   const G = toNmea(lng, false);
-  const phoneNumber = '+16474278100';
   const trackId = '14345';
 
-  return `$GPRMC,${hhmmss},A,${L.dm},${L.dir},${G.dm},${G.dir},0,0,${ddmmyy},${phoneNumber},0,0,0,${trackId},${alert},${deviceId}#`;
+  return `$GPRMC,${hhmmss},A,${L.dm},${L.dir},${G.dm},${G.dir},0,0,${ddmmyy},0,0,0,${trackId},${alert},${deviceId}#`;
 };
 
 export default function App() {
@@ -54,8 +43,8 @@ export default function App() {
   const watchIdRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  const DEVICE_ID = getDeviceId();
-  const SERVER = '179.60.177.14:10901';
+  const DEVICE_ID = '4659060906808';
+  const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
 
   // Check permission status on mount
@@ -182,18 +171,30 @@ export default function App() {
     }
   };
 
-  // Send data to server (simulated for web)
-  const sendData = (message: string) => {
+  // Send data to the configured server endpoint
+  const sendData = async (message: string) => {
     setLastTransmission(message);
-    setStatus('Sent');
-    
-    // In a real implementation, this would send via WebSocket or HTTP
-    // For now, we simulate the send
-    console.log('Sending to server:', message);
-    
-    setTimeout(() => {
-      if (isActive) setStatus('Connected');
-    }, 800);
+    setStatus('Connecting');
+
+    try {
+      await fetch(SERVER, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: message,
+        mode: 'no-cors',
+      });
+
+      setStatus('Sent');
+
+      setTimeout(() => {
+        if (isActive) setStatus('Connected');
+      }, 800);
+    } catch (error) {
+      console.error('Failed to send SOS message', error);
+      setStatus('Disconnected');
+    }
   };
 
   // Cleanup on unmount
