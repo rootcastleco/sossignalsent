@@ -7,16 +7,6 @@ import { TransmissionCard } from './components/TransmissionCard';
 
 type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error';
 
-// Generate a persistent device ID (since IMEI isn't accessible in web browsers)
-const getDeviceId = () => {
-  let deviceId = localStorage.getItem('device_id');
-  if (!deviceId) {
-    deviceId = Math.random().toString().slice(2, 15);
-    localStorage.setItem('device_id', deviceId);
-  }
-  return deviceId;
-};
-
 // Format GPRMC message
 const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM') => {
   const now = new Date();
@@ -36,10 +26,9 @@ const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM')
 
   const L = toNmea(lat, true);
   const G = toNmea(lng, false);
-  const phoneNumber = '+16474278100';
   const trackId = '14345';
 
-  return `$GPRMC,${hhmmss},A,${L.dm},${L.dir},${G.dm},${G.dir},0,0,${ddmmyy},${phoneNumber},0,0,0,${trackId},${alert},${deviceId}#`;
+  return `$GPRMC,${hhmmss},A,${L.dm},${L.dir},${G.dm},${G.dir},0,0,${ddmmyy},0,0,0,${trackId},${alert},${deviceId}#`;
 };
 
 export default function App() {
@@ -53,10 +42,97 @@ export default function App() {
 
   const watchIdRef = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const messageQueueRef = useRef<string[]>([]);
+  const connectPromiseRef = useRef<Promise<void> | null>(null);
+  const isActiveRef = useRef(isActive);
 
-  const DEVICE_ID = getDeviceId();
-  const SERVER = '179.60.177.14:10901';
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
+
+  const DEVICE_ID = '4659060906808';
+  const SERVER_HOST = '179.60.177.14:6002';
+  const SOCKET_URL = `ws://${SERVER_HOST}`;
+  const SERVER = `tcp://${SERVER_HOST}`;
   const INTERVAL = '5 seconds';
+
+  const markSent = () => {
+    setStatus('Sent');
+    setTimeout(() => {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        setStatus('Connected');
+      }
+    }, 800);
+  };
+
+  const flushQueue = () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    while (messageQueueRef.current.length > 0) {
+      const queued = messageQueueRef.current.shift();
+      if (queued) {
+        ws.send(queued);
+        markSent();
+      }
+    }
+  };
+
+  const ensureSocketConnection = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+
+    if (connectPromiseRef.current) {
+      return connectPromiseRef.current;
+    }
+
+    connectPromiseRef.current = new Promise<void>((resolve, reject) => {
+      setStatus('Connecting');
+
+      try {
+        const ws = new WebSocket(SOCKET_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        ws.onopen = () => {
+          settled = true;
+          setStatus('Connected');
+          flushQueue();
+          resolve();
+          connectPromiseRef.current = null;
+        };
+
+        ws.onerror = (event) => {
+          console.error('WebSocket error', event);
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection error'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+
+        ws.onclose = () => {
+          wsRef.current = null;
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection closed before opening'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket', error);
+        connectPromiseRef.current = null;
+        reject(error as Error);
+      }
+    });
+
+    return connectPromiseRef.current;
+  };
 
   // Check permission status on mount
   useEffect(() => {
@@ -180,20 +256,40 @@ export default function App() {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    messageQueueRef.current = [];
+    connectPromiseRef.current = null;
   };
 
-  // Send data to server (simulated for web)
-  const sendData = (message: string) => {
+  // Send data to the configured server endpoint
+  const sendData = async (message: string) => {
     setLastTransmission(message);
-    setStatus('Sent');
-    
-    // In a real implementation, this would send via WebSocket or HTTP
-    // For now, we simulate the send
-    console.log('Sending to server:', message);
-    
-    setTimeout(() => {
-      if (isActive) setStatus('Connected');
-    }, 800);
+    const ws = wsRef.current;
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(message);
+        markSent();
+        return;
+      } catch (error) {
+        console.error('Failed to send over existing socket', error);
+      }
+    }
+
+    messageQueueRef.current.push(message);
+
+    try {
+      await ensureSocketConnection();
+      flushQueue();
+    } catch (error) {
+      console.error('Failed to send SOS message', error);
+      setStatus('Disconnected');
+    }
   };
 
   // Cleanup on unmount
