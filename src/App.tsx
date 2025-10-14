@@ -7,6 +7,7 @@ import { TransmissionCard } from './components/TransmissionCard';
 
 type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error' | 'Relay Error';
 type RelayState = 'Offline' | 'Connecting' | 'Connected' | 'Error';
+type StatusType = 'Connected' | 'Sent' | 'Disconnected' | 'Connecting' | 'GPS Error';
 
 // Format GPRMC message
 const formatGPRMC = (lat: number, lng: number, deviceId: string, alert = 'NORM') => {
@@ -60,12 +61,9 @@ export default function App() {
   const TCP_SERVER = '179.60.177.14:6002';
   const RELAY_URL = (import.meta.env.VITE_TCP_RELAY_URL as string | undefined) ?? 'ws://localhost:6003';
   const SERVER = `tcp://${TCP_SERVER}`;
+  const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
-  const requestPermissionButtonClass = [
-    'mt-3 w-full bg-[#3b82f6] hover:bg-[#2563eb]',
-    'text-white rounded-lg py-2 text-[12px]',
-    'font-semibold transition-colors',
-  ].join(' ');
+  const requestPermissionButtonClass = 'mt-3 w-full bg-[#3b82f6] hover:bg-[#2563eb] text-white rounded-lg py-2 text-[12px] font-semibold transition-colors';
 
   const markSent = () => {
     setStatus('Sent');
@@ -224,6 +222,201 @@ export default function App() {
         relayReadyRef.current = false;
         setRelayState('Error');
         setStatus('Relay Error');
+        connectPromiseRef.current = null;
+        reject(error as Error);
+      }
+    });
+
+    return connectPromiseRef.current;
+  };
+
+  const markSent = () => {
+    setStatus('Sent');
+    setTimeout(() => {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
+      if (isActiveRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        setStatus('Connected');
+      }
+    }, 800);
+  };
+
+  const flushQueue = () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !relayReadyRef.current) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    while (messageQueueRef.current.length > 0) {
+      const queued = messageQueueRef.current.shift();
+      if (queued) {
+        ws.send(queued);
+        markSent();
+      }
+    }
+  };
+
+  const ensureSocketConnection = () => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && relayReadyRef.current) {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+
+    if (connectPromiseRef.current) {
+      return connectPromiseRef.current;
+    }
+
+    connectPromiseRef.current = new Promise<void>((resolve, reject) => {
+      setStatus('Connecting');
+      setRelayState('Connecting');
+      relayReadyRef.current = false;
+
+      if (!textDecoderRef.current) {
+        textDecoderRef.current = new TextDecoder();
+      }
+
+      try {
+        const ws = new WebSocket(RELAY_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        const resolveOnce = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+
+        const rejectOnce = (error: Error) => {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        };
+
+        ws.onopen = () => {
+          // Wait for relay status messages before marking as connected.
+
+      try {
+        const ws = new WebSocket(SOCKET_URL);
+        wsRef.current = ws;
+        let settled = false;
+
+        ws.onopen = () => {
+          settled = true;
+          setStatus('Connected');
+          flushQueue();
+          resolve();
+          connectPromiseRef.current = null;
+        };
+
+        ws.onerror = (event) => {
+          console.error('WebSocket error', event);
+          relayReadyRef.current = false;
+          setRelayState('Error');
+          setStatus('Relay Error');
+          wsRef.current = null;
+          rejectOnce(new Error('WebSocket connection error'));
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection error'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+
+        ws.onclose = () => {
+          relayReadyRef.current = false;
+          setRelayState('Offline');
+          if (isActiveRef.current) {
+            setStatus('Disconnected');
+          }
+          wsRef.current = null;
+          rejectOnce(new Error('Relay connection closed'));
+          connectPromiseRef.current = null;
+        };
+
+        ws.onmessage = async (event) => {
+          let raw = '';
+
+          try {
+            if (typeof event.data === 'string') {
+              raw = event.data;
+            } else if (event.data instanceof Blob) {
+              raw = await event.data.text();
+            } else if (event.data instanceof ArrayBuffer) {
+              raw = textDecoderRef.current ? textDecoderRef.current.decode(event.data) : '';
+            }
+          } catch (error) {
+            console.error('Failed to decode relay message', error);
+            return;
+          }
+
+          if (!raw) {
+            return;
+          }
+
+          let parsed: { type?: string; status?: string; message?: string; data?: string };
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            console.warn('Received non-JSON relay payload', raw, error);
+            return;
+          }
+
+          if (parsed.type === 'status') {
+            switch (parsed.status) {
+              case 'connecting':
+                setRelayState('Connecting');
+                break;
+              case 'connected':
+                relayReadyRef.current = true;
+                setRelayState('Connected');
+                if (isActiveRef.current) {
+                  setStatus('Connected');
+                }
+                flushQueue();
+                resolveOnce();
+                connectPromiseRef.current = null;
+                break;
+              case 'disconnected':
+                relayReadyRef.current = false;
+                setRelayState('Offline');
+                if (isActiveRef.current) {
+                  setStatus('Disconnected');
+                }
+                rejectOnce(new Error('Relay disconnected'));
+                connectPromiseRef.current = null;
+                break;
+              case 'error':
+                relayReadyRef.current = false;
+                setRelayState('Error');
+                setStatus('Relay Error');
+                rejectOnce(new Error(parsed.message || 'Relay error'));
+                connectPromiseRef.current = null;
+                break;
+              default:
+                break;
+            }
+          } else if (parsed.type === 'downstream' && typeof parsed.data === 'string') {
+            setLastInbound(parsed.data);
+          }
+        };
+      } catch (error) {
+        console.error('Failed to create relay WebSocket', error);
+        relayReadyRef.current = false;
+        setRelayState('Error');
+        setStatus('Relay Error');
+          wsRef.current = null;
+          if (!settled) {
+            settled = true;
+            reject(new Error('WebSocket connection closed before opening'));
+          }
+          setStatus('Disconnected');
+          connectPromiseRef.current = null;
+        };
+      } catch (error) {
+        console.error('Failed to create WebSocket', error);
         connectPromiseRef.current = null;
         reject(error as Error);
       }
@@ -406,6 +599,27 @@ export default function App() {
       console.error('Failed to send SOS message', error);
       setStatus('Disconnected');
       setRelayState('Error');
+    setLastTransmission(message);
+    setStatus('Connecting');
+
+    try {
+      await fetch(SERVER, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: message,
+        mode: 'no-cors',
+      });
+
+      setStatus('Sent');
+
+      setTimeout(() => {
+        if (isActive) setStatus('Connected');
+      }, 800);
+    } catch (error) {
+      console.error('Failed to send SOS message', error);
+      setStatus('Disconnected');
     }
   };
 
