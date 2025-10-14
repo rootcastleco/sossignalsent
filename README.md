@@ -1,7 +1,4 @@
 
-  # Mobile GPS Tracker Interface
-
-  This is a code bundle for Mobile GPS Tracker Interface. The original project is available at https://www.figma.com/design/ecDvr9ZKGOSFutMT8pHTfc/Mobile-GPS-Tracker-Interface.
 
   ## Running the code
 
