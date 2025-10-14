@@ -51,9 +51,7 @@ export default function App() {
   }, [isActive]);
 
   const DEVICE_ID = '4659060906808';
-  const SERVER_HOST = '179.60.177.14:6002';
-  const SOCKET_URL = `ws://${SERVER_HOST}`;
-  const SERVER = `tcp://${SERVER_HOST}`;
+  const SERVER = 'http://179.60.177.14:6002';
   const INTERVAL = '5 seconds';
 
   const markSent = () => {
@@ -269,23 +267,23 @@ export default function App() {
   // Send data to the configured server endpoint
   const sendData = async (message: string) => {
     setLastTransmission(message);
-    const ws = wsRef.current;
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try {
-        ws.send(message);
-        markSent();
-        return;
-      } catch (error) {
-        console.error('Failed to send over existing socket', error);
-      }
-    }
-
-    messageQueueRef.current.push(message);
+    setStatus('Connecting');
 
     try {
-      await ensureSocketConnection();
-      flushQueue();
+      await fetch(SERVER, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+        },
+        body: message,
+        mode: 'no-cors',
+      });
+
+      setStatus('Sent');
+
+      setTimeout(() => {
+        if (isActive) setStatus('Connected');
+      }, 800);
     } catch (error) {
       console.error('Failed to send SOS message', error);
       setStatus('Disconnected');
